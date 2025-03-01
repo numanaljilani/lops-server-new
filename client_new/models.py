@@ -5,6 +5,7 @@ from decimal import Decimal
 from BaseApp.models import Company, Employee
 from timesheet.models import Timesheet
 from django.core.serializers.json import DjangoJSONEncoder
+from django.utils import timezone
 
 
 PERCENTAGE_VALIDATOR = [MinValueValidator(0), MaxValueValidator(100)]
@@ -206,6 +207,13 @@ class PaymentBall(models.Model):
         ('green', 'Green'),
     ]
 
+    VERIFICATION_STATUS_CHOICES = [
+        ('unverified', 'Unverified'),
+        ('verified', 'Verified'),
+        ('invoiced', 'Invoiced'),
+        ('paid', 'Paid')
+    ]
+
     payment_id = models.AutoField(primary_key=True)
     job_card = models.ForeignKey(JobCard, on_delete=models.CASCADE, related_name="payment_balls")
     project_percentage = models.DecimalField(
@@ -235,6 +243,54 @@ class PaymentBall(models.Model):
     )
     payment_terms = models.TextField(blank=True, null=True)  # Add this field
 
+    # New fields for accounts team
+    verification_status = models.CharField(
+        max_length=20,
+        choices=VERIFICATION_STATUS_CHOICES,
+        default='unverified'
+    )
+    verified_by = models.ForeignKey(
+        Employee,
+        on_delete=models.SET_NULL,
+        null=True,
+        related_name='verified_payments'
+    )
+    verification_date = models.DateTimeField(null=True, blank=True)
+    payment_received_date = models.DateTimeField(null=True, blank=True)
+    invoice_number = models.CharField(max_length=20, blank=True, null=True)
+    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    notes = models.TextField(blank=True, null=True)
+
+    def verify_completion(self, verified_by):
+        if self.project_status == 'Completed' and self.verification_status == 'unverified':
+            self.verification_status = 'verified'
+            self.verified_by = verified_by
+            self.verification_date = timezone.now()
+            self.color_status = 'purple'
+            self.save()
+            return True
+        return False
+
+    def mark_as_invoiced(self):
+        if self.verification_status == 'verified':
+            self.verification_status = 'invoiced'
+            self.color_status = 'pink'
+            if not self.invoice_number:
+                self.invoice_number = f"INV-{uuid.uuid4().hex[:6].upper()}"
+            self.save()
+            return True
+        return False
+
+    def mark_as_paid(self):
+        if self.verification_status == 'invoiced':
+            self.verification_status = 'paid'
+            self.payment_received_date = timezone.now()
+            self.color_status = 'green'
+            self.save()
+            return True
+        return False
+    
+
     def generate_invoice(self):
         if self.color_status == 'purple' and not self.invoice_number:
             self.invoice_number = f"INV-{uuid.uuid4().hex[:6].upper()}"
@@ -259,7 +315,7 @@ class PaymentBall(models.Model):
         if isinstance(payment_terms, str):
             self.payment_terms = payment_terms
         else:
-            self.payment_terms = json.dumps(payment_terms, cls=DjangoJSONEncoder)      
+            self.payment_terms = json.dumps(payment_terms, cls=DjangoJSONEncoder) 
 
 class Task(models.Model):
     TASK_STATUS_CHOICES = [
@@ -388,6 +444,7 @@ class Expense(models.Model):
     remarks = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    # urls field 
 
     class Meta:
         ordering = ['-date', '-created_at']

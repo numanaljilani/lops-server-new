@@ -1,7 +1,7 @@
 
 from rest_framework import viewsets
 from .models import Client, RFQ, JobCard, PaymentBall, Task, SubContracting, ExpenseCategory, Expense
-from .serializers import ClientSerializer, RFQSerializer, JobCardSerializer, PaymentBallSerializer, TaskSerializer, SubContractingSerializer, ExpenseCategorySerializer, ExpenseSerializer, ExpenseHistorySerializer
+from .serializers import ClientSerializer, RFQSerializer, JobCardSerializer, PaymentBallSerializer, TaskSerializer, SubContractingSerializer, ExpenseCategorySerializer, ExpenseSerializer, ExpenseHistorySerializer, AccountsPaymentBallSerializer
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.exceptions import NotFound
 from rest_framework.decorators import action
@@ -9,6 +9,7 @@ from rest_framework.response import Response
 from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend  # Add this import
 from .filters import RFQFilter, JobCardFilter  # Import the filter
+from django.db.models import Sum 
 
 
 class ClientViewSet(viewsets.ModelViewSet):
@@ -83,6 +84,112 @@ class PaymentBallViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(payment_balls, many=True)
         return Response(serializer.data)
 
+
+# client_new/views.py
+
+class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
+    serializer_class = AccountsPaymentBallSerializer
+    queryset = PaymentBall.objects.all()
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['verification_status', 'project_status']
+    print(viewsets)
+
+ 
+
+    def get_queryset(self):
+        return PaymentBall.objects.select_related(
+            'job_card', 'verified_by'
+        ).order_by('-verification_date')
+    
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', False)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        print(f'urd : {request.data}')
+        if not serializer.is_valid():
+            print("Validation errors:", serializer.errors)  # Debugging line
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+            
+        self.perform_update(serializer)
+        return Response(serializer.data) 
+
+    @action(detail=True, methods=['post'])
+    def verify(self, request, pk=None):
+        payment_ball = self.get_object()
+        verified_by = request.user.employee  # Assuming user-employee relationship
+        
+        if payment_ball.verify_completion(verified_by):
+            return Response({
+                'status': 'success',
+                'message': 'Payment ball verified successfully'
+            })
+        return Response({
+            'status': 'error',
+            'message': 'Cannot verify payment ball'
+        }, status=400)
+
+    @action(detail=True, methods=['post'])
+    def mark_invoiced(self, request, pk=None):
+        payment_ball = self.get_object()
+        if payment_ball.mark_as_invoiced():
+            return Response({
+                'status': 'success',
+                'message': 'Payment ball marked as invoiced'
+            })
+        return Response({
+            'status': 'error',
+            'message': 'Cannot mark as invoiced'
+        }, status=400)
+
+    @action(detail=True, methods=['post'])
+    def mark_paid(self, request, pk=None):
+        payment_ball = self.get_object()
+        if payment_ball.mark_as_paid():
+            return Response({
+                'status': 'success',
+                'message': 'Payment ball marked as paid'
+            })
+        return Response({
+            'status': 'error',
+            'message': 'Cannot mark as paid'
+        }, status=400)
+
+    @action(detail=False)
+    def pending_verification(self, request):
+        queryset = self.get_queryset().filter(
+            project_status='Completed',
+            verification_status='unverified'
+        )
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @action(detail=False)
+    def pending_payment(self, request):
+        queryset = self.get_queryset().filter(
+            verification_status='invoiced'
+        )
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
+
+    @action(detail=False)
+    def payment_summary(self, request):
+        summary = {
+            'unverified': self.get_queryset().filter(verification_status='unverified').count(),
+            'verified': self.get_queryset().filter(verification_status='verified').count(),
+            'invoiced': self.get_queryset().filter(verification_status='invoiced').count(),
+            'paid': self.get_queryset().filter(verification_status='paid').count(),
+            'total_amount': {
+                'pending': self.get_queryset().filter(verification_status='unverified').aggregate(
+                    total=Sum('amount')
+                )['total'] or 0,
+                'received': self.get_queryset().filter(verification_status='paid').aggregate(
+                    total=Sum('amount')
+                )['total'] or 0
+            }
+        }
+        return Response(summary)
 
 
 class TaskViewSet(viewsets.ModelViewSet):

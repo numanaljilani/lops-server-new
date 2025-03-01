@@ -236,7 +236,26 @@ class PaymentBallSerializer(serializers.ModelSerializer):
         representation['payment_terms'] = representation.pop('payment_terms_display', [])
         return representation
 
+# client_new/serializers.py
 
+class AccountsPaymentBallSerializer(serializers.ModelSerializer):
+    verified_by_name = serializers.CharField(source='verified_by.name', read_only=True)
+    job_number = serializers.CharField(source='job_card.job_number', read_only=True)
+    client_name = serializers.CharField(source='job_card.client_name', read_only=True)
+
+    class Meta:
+        model = PaymentBall
+        fields = [
+            'payment_id', 'job_card', 'job_number', 'client_name',
+            'project_percentage', 'project_status', 'verification_status',
+            'verified_by', 'verified_by_name', 'verification_date',
+            'payment_received_date', 'invoice_number', 'amount',
+            'notes', 'color_status'
+        ]
+        read_only_fields = [
+            'verification_date', 'payment_received_date',
+            'verified_by', 'invoice_number'
+        ]
 
 
 class TaskSerializer(serializers.ModelSerializer):
