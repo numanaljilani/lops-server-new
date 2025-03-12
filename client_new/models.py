@@ -48,6 +48,23 @@ class RFQ(models.Model):
     quotation_amount = models.DecimalField(max_digits=10, decimal_places=2)
     remarks = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=50, default='Pending', choices=STATUS_CHOICES)
+
+    # New fields
+    is_approved = models.BooleanField(default=False)
+    approved_by = models.ForeignKey(
+        Employee, 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True,
+        related_name='approved_rfqs'
+    )
+    approval_date = models.DateTimeField(null=True, blank=True)
+    
+    def approve(self, approved_by):
+        self.is_approved = True
+        self.approved_by = approved_by
+        self.approval_date = timezone.now()
+        self.save()
     
 
     def __str__(self):
@@ -96,14 +113,24 @@ class JobCard(models.Model):
     gross_profit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     profit_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
 
+    ##lpo
+    lpo_number = models.CharField(max_length=20, unique=True)
+
     def update_project_financials(self):
         """Update project financial calculations"""
         # Calculate total approved expenses
         approved_expenses = self.expenses.filter(status='Approved')
         self.total_expenses = sum(expense.amount for expense in approved_expenses)
+        
+        # Calculate total pending expenses
+        pending_expenses = self.expenses.filter(status='Pending')
+        total_pending = sum(expense.amount for expense in pending_expenses)
+        
+        # Calculate total paid and balance
+        total_paid = sum(expense.paid_amount for expense in approved_expenses)
+        total_balance = sum(expense.balance_amount for expense in approved_expenses)
 
         # Calculate total timesheet cost
-        
         timesheets = Timesheet.objects.filter(job_card=self)
         self.total_timesheet_cost = sum(
             timesheet.hours_logged * timesheet.hourly_rate 
@@ -113,44 +140,22 @@ class JobCard(models.Model):
         # Calculate profit
         if self.rfq:
             total_cost = self.total_expenses + self.total_timesheet_cost
-            self.profit = self.rfq.quotation_amount - total_cost
+            self.gross_profit = self.rfq.quotation_amount - total_cost
+            
+            # Calculate profit percentage
+            if self.rfq.quotation_amount > 0:
+                self.profit_percentage = (self.gross_profit / self.rfq.quotation_amount * 100).quantize(Decimal('0.01'))
+            else:
+                self.profit_percentage = Decimal('0.00')
 
         # Save only the financial fields
-        self.save(update_fields=['total_expenses', 'total_timesheet_cost', 'profit'])
+        self.save(update_fields=[
+            'total_expenses', 'total_timesheet_cost', 
+            'gross_profit', 'profit_percentage'
+        ])
 
-    def save(self, *args, **kwargs):
-        # Auto-fill client name
-        if self.rfq:
-            self.client_name = self.rfq.client.client_name
 
-        # Calculate profit
-        if self.rfq and self.project_expense:
-            self.profit = self.rfq.quotation_amount - self.project_expense
 
-        # First save to get the primary key
-        super().save(*args, **kwargs)
-
-        # Only calculate completion percentage if the instance has been saved (has pk)
-        if self.pk:
-            total_completion = 0
-            total_weight = 0
-            
-            payment_balls = self.payment_balls.all()
-            if payment_balls.exists():
-                for payment_ball in payment_balls:
-                    tasks = payment_ball.tasks.all()
-                    if tasks:
-                        ball_completion = sum(
-                            task.completion_percentage * task.weightage / 100 
-                            for task in tasks
-                        )
-                        total_completion += ball_completion * payment_ball.project_percentage / 100
-                        total_weight += payment_ball.project_percentage
-
-                if total_weight > 0:
-                    self.completion_percentage = total_completion
-                    # Save again only if completion percentage changed
-                    super().save(update_fields=['completion_percentage'])
 
 
     def get_payment_terms(self):
@@ -188,6 +193,33 @@ class JobCard(models.Model):
             self.payment_terms = json.dumps(terms_list, cls=DjangoJSONEncoder)
         else:
             self.payment_terms = json.dumps(payment_terms, cls=DjangoJSONEncoder)
+
+
+    def update_completion_percentage(self):
+        """Update job card completion based on payment balls"""
+        payment_balls = self.payment_balls.all()
+        if not payment_balls.exists():
+            return
+        
+        # Simple average of payment ball percentages
+        total_percentage = sum(pb.project_percentage for pb in payment_balls)
+        count = payment_balls.count()
+        
+        if count > 0:
+            # Calculate the average completion
+            self.completion_percentage = min(Decimal('100'), (total_percentage / count).quantize(Decimal('0.01')))
+            
+            # Update status based on completion
+            if self.completion_percentage >= Decimal('100'):
+                self.status = 'Completed'
+                self.completion_percentage = Decimal('100')  # Ensure it's exactly 100
+            elif self.completion_percentage > Decimal('0'):
+                self.status = 'Ongoing'
+            else:
+                self.status = 'Pending'
+            
+            # Use update_fields to avoid recursive updates
+            self.save(update_fields=['completion_percentage', 'status'])        
 
         
 
@@ -235,7 +267,7 @@ class PaymentBall(models.Model):
         default='gray',
         null=False
     )
-    invoice_number = models.CharField(max_length=20, blank=True, null=True)
+    
     amount = models.DecimalField(
         max_digits=10, 
         decimal_places=2,
@@ -257,9 +289,31 @@ class PaymentBall(models.Model):
     )
     verification_date = models.DateTimeField(null=True, blank=True)
     payment_received_date = models.DateTimeField(null=True, blank=True)
-    invoice_number = models.CharField(max_length=20, blank=True, null=True)
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
-    notes = models.TextField(blank=True, null=True)
+    invoice_number = models.CharField(max_length=20, blank=True, null=True) # add a default value
+    
+
+    def save(self, *args, **kwargs):
+    # For new instances (no primary key yet), always set project_percentage to 0
+        if not self.pk:
+            self.project_percentage = Decimal('0')
+            self.project_status = 'Pending'
+        
+        # Get the current instance from the database if it exists
+        if self.pk:
+            old_instance = PaymentBall.objects.get(pk=self.pk)
+            # Check if verification_status changed to 'verified'
+            if self.verification_status == 'verified' and old_instance.verification_status != 'verified':
+                self.verification_date = timezone.now()
+        else:
+            # For new instances, set date if status is verified
+            if self.verification_status == 'verified':
+                self.verification_date = timezone.now()
+        
+        super().save(*args, **kwargs)
+        
+        # If this is a status update to 'Completed', generate invoice
+        if self.project_status == 'Completed' and not self.invoice_number:
+            self.generate_invoice()
 
     def verify_completion(self, verified_by):
         if self.project_status == 'Completed' and self.verification_status == 'unverified':
@@ -317,6 +371,20 @@ class PaymentBall(models.Model):
         else:
             self.payment_terms = json.dumps(payment_terms, cls=DjangoJSONEncoder) 
 
+
+    def recalculate_completion(self):
+        """Force recalculation of project_percentage based on tasks"""
+        tasks = self.tasks.all()
+        if not tasks.exists():
+            return
+        
+        # Get the first task and call its update method
+        first_task = tasks.first()
+        if first_task:
+            first_task.update_payment_ball_completion()
+            
+            
+
 class Task(models.Model):
     TASK_STATUS_CHOICES = [
         ('Pending', 'Pending'),
@@ -345,6 +413,8 @@ class Task(models.Model):
         related_name='assigned_tasks'
     )
     remarks = models.TextField(blank=True, null=True)
+    # remarks history
+    remarks_history = models.JSONField(default=list, blank=True)
     completion_percentage = models.DecimalField(
         max_digits=5, 
         decimal_places=2, 
@@ -353,9 +423,85 @@ class Task(models.Model):
     )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+    
 
     def __str__(self):
         return f"Task {self.task_id} for PaymentBall {self.payment_ball.payment_id}"
+    
+
+    def save(self, *args, **kwargs):
+        # Track remarks history if this is an update
+        if self.pk:
+            old_task = Task.objects.get(pk=self.pk)
+            
+            # If remarks have changed, save to history
+            if old_task.remarks != self.remarks and old_task.remarks:
+                if not self.remarks_history:
+                    self.remarks_history = []
+                
+                self.remarks_history.append({
+                    'remarks': old_task.remarks,
+                    'timestamp': timezone.now().isoformat(),
+                    'status': old_task.status,
+                    'completion_percentage': float(old_task.completion_percentage)
+                })
+            
+            # Auto-update status based on completion percentage
+            if float(self.completion_percentage) == 0:
+                self.status = 'Pending'
+            elif float(self.completion_percentage) < 100:
+                self.status = 'InProgress'
+            elif float(self.completion_percentage) == 100:
+                self.status = 'Completed'
+        
+        # Call the original save method
+        super().save(*args, **kwargs)
+        
+        # Update parent payment ball after saving
+        self.update_payment_ball_completion()
+    
+    def update_payment_ball_completion(self):
+        """Update the parent payment ball's completion percentage based on all tasks"""
+        payment_ball = self.payment_ball
+        tasks = payment_ball.tasks.all()
+        
+        if not tasks.exists():
+            return
+        
+        # Calculate the weighted completion percentage
+        total_weightage = sum(task.weightage for task in tasks)
+        
+        if total_weightage == 0:
+            payment_ball.project_percentage = Decimal('0')
+            payment_ball.save(update_fields=['project_percentage'])
+            return
+            
+        # Calculate the weighted completion
+        weighted_completion = Decimal('0')
+        for task in tasks:
+            task_contribution = (task.weightage / total_weightage) * (task.completion_percentage / Decimal('100'))
+            weighted_completion += task_contribution * Decimal('100')
+        
+        # Update the payment ball's project_percentage
+        payment_ball.project_percentage = weighted_completion.quantize(Decimal('0.01'))
+        
+        # Update status based on completion
+        if payment_ball.project_percentage == 0:
+            payment_ball.project_status = 'Pending'
+        elif payment_ball.project_percentage >= 100:
+            payment_ball.project_status = 'Completed'
+            payment_ball.project_percentage = Decimal('100')  # Cap at 100
+        else:
+            payment_ball.project_status = 'InProgress'
+        
+        # Save the payment ball
+        payment_ball.save(update_fields=['project_percentage', 'project_status'])
+        
+        # Update the JobCard completion percentage
+        if hasattr(payment_ball, 'job_card'):
+            payment_ball.job_card.update_completion_percentage()
+    
+    
 
     class Meta:
         ordering = ['-created_at']
@@ -406,6 +552,19 @@ class SubContracting(models.Model):
 
 
 # client_new/models.py
+class Supplier(models.Model):
+    supplier_id = models.AutoField(primary_key=True)
+    name = models.CharField(max_length=255)
+    contact_person = models.CharField(max_length=255, blank=True, null=True)
+    contact_number = models.CharField(max_length=20, blank=True, null=True)
+    email = models.EmailField(blank=True, null=True)
+    address = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    status = models.BooleanField(default=True)
+
+    def __str__(self):
+        return self.name
+
 
 class ExpenseCategory(models.Model):
     name = models.CharField(max_length=100)
@@ -432,19 +591,47 @@ class Expense(models.Model):
         ('Subcontractor', 'Subcontractor'),
         ('Other', 'Other'),
     ]
+    
+    PAYMENT_MODE_CHOICES = [
+        ('Cash', 'Cash'),
+        ('Cheque', 'Cheque'),
+        ('Bank Transfer', 'Bank Transfer'),
+        ('Credit Card', 'Credit Card'),
+        ('Other', 'Other'),
+    ]
 
     expense_id = models.AutoField(primary_key=True)
     job_card = models.ForeignKey(JobCard, on_delete=models.CASCADE, related_name='expenses')
+    # Auto-populate LPO number from JobCard
+    lpo_number = models.CharField(max_length=20, blank=True, null=True, editable=False)
+    # Link to supplier
+    supplier = models.ForeignKey(Supplier, on_delete=models.PROTECT, related_name='expenses')
+    
     category = models.ForeignKey(ExpenseCategory, on_delete=models.PROTECT)
     expense_type = models.CharField(max_length=20, choices=EXPENSE_TYPE_CHOICES)
     description = models.TextField()
-    amount = models.DecimalField(max_digits=10, decimal_places=2)
+    
+    # Financial values
+    net_amount = models.DecimalField(max_digits=10, decimal_places=2, help_text="Net amount without tax")
+    vat_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=5.00, 
+                                        validators=[MinValueValidator(0), MaxValueValidator(100)])
+    vat_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False)
+    amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False, 
+                                help_text="Total amount including VAT")
+    
+    # Payment details
+    payment_mode = models.CharField(max_length=20, choices=PAYMENT_MODE_CHOICES, default='Cash')
+    payment_date = models.DateField(null=True, blank=True)
+    paid_amount = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    balance_amount = models.DecimalField(max_digits=10, decimal_places=2, editable=False)
+    due_date = models.DateField(null=True, blank=True)
+    
+    # Status fields
     date = models.DateField()
     status = models.CharField(max_length=20, choices=EXPENSE_STATUS_CHOICES, default='Pending')
     remarks = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-    # urls field 
 
     class Meta:
         ordering = ['-date', '-created_at']
@@ -453,6 +640,17 @@ class Expense(models.Model):
         return f"Expense {self.expense_id} - {self.job_card.job_number} - {self.amount}"
 
     def save(self, *args, **kwargs):
+        # Auto-populate LPO number from JobCard
+        if self.job_card and not self.lpo_number:
+            self.lpo_number = self.job_card.lpo_number
+            
+        # Calculate VAT and total amount
+        self.vat_amount = (self.net_amount * self.vat_percentage / 100).quantize(Decimal('0.01'))
+        self.amount = self.net_amount + self.vat_amount
+        
+        # Calculate balance
+        self.balance_amount = self.amount - self.paid_amount
+        
         super().save(*args, **kwargs)
         self.job_card.update_project_financials()        
 

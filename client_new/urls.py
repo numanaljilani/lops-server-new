@@ -4,7 +4,7 @@ from .views import (
     ClientViewSet,
     PaymentBallViewSet, GlobalRFQViewSet, 
     GlobalJobCardViewSet,  
-    GlobalTaskViewSet, GlobalSubContractingViewSet, ExpenseCategoryViewSet, ExpenseViewSet, AccountsPaymentBallViewSet
+    GlobalTaskViewSet, GlobalSubContractingViewSet, ExpenseCategoryViewSet, ExpenseViewSet, AccountsPaymentBallViewSet, SupplierViewSet
 )
 
 # Global router for independent access
@@ -17,6 +17,8 @@ global_router.register(r'tasks', GlobalTaskViewSet, basename='tasks')
 global_router.register(r'subcontracts', GlobalSubContractingViewSet, basename='subcontracts')
 global_router.register(r'expense-categories', ExpenseCategoryViewSet, basename='expense')
 global_router.register(r'expenses', ExpenseViewSet, basename='expense-category')
+
+global_router.register(r'suppliers', SupplierViewSet, basename='supplier')
 
 global_router.register(
     r'accounts/payment-balls',

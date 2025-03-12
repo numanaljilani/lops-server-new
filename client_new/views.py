@@ -1,7 +1,7 @@
 
 from rest_framework import viewsets
-from .models import Client, RFQ, JobCard, PaymentBall, Task, SubContracting, ExpenseCategory, Expense
-from .serializers import ClientSerializer, RFQSerializer, JobCardSerializer, PaymentBallSerializer, TaskSerializer, SubContractingSerializer, ExpenseCategorySerializer, ExpenseSerializer, ExpenseHistorySerializer, AccountsPaymentBallSerializer
+from .models import Client, RFQ, JobCard, PaymentBall, Task, SubContracting, ExpenseCategory, Expense, Supplier
+from .serializers import ClientSerializer, RFQSerializer, JobCardSerializer, PaymentBallSerializer, TaskSerializer, SubContractingSerializer, ExpenseCategorySerializer, ExpenseSerializer, ExpenseHistorySerializer, AccountsPaymentBallSerializer, SupplierSerializer
 from rest_framework.viewsets import ModelViewSet
 from rest_framework.exceptions import NotFound
 from rest_framework.decorators import action
@@ -9,7 +9,12 @@ from rest_framework.response import Response
 from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend  # Add this import
 from .filters import RFQFilter, JobCardFilter  # Import the filter
-from django.db.models import Sum 
+from django.db.models import Sum, Count 
+from django.utils import timezone
+from rest_framework.decorators import action
+from BaseApp.serializers import EmployeeSerializer
+from BaseApp.models import Employee
+
 
 
 class ClientViewSet(viewsets.ModelViewSet):
@@ -35,6 +40,29 @@ class GlobalRFQViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend]
     filterset_class = RFQFilter
 
+    @action(detail=True, methods=['post'])
+    def approve(self, request, pk=None):
+        rfq = self.get_object()
+        
+        # Get the employee (assuming user has employee relationship)
+        # For testing, you might need to specify an employee ID
+        employee_id = request.data.get('employee_id')  # Optional for testing
+        if employee_id:
+            approved_by = Employee.objects.get(id=employee_id)
+        else:
+            # In production with proper authentication:
+            approved_by = request.user.employee
+            approved_by = None  # For now
+        
+        rfq.approve(approved_by)
+        
+        serializer = self.get_serializer(rfq)
+        return Response({
+            'status': 'success',
+            'message': 'RFQ approved successfully',
+            'rfq': serializer.data
+        })
+
 
 from rest_framework import viewsets
 from .models import JobCard, PaymentBall
@@ -54,6 +82,72 @@ class GlobalJobCardViewSet(viewsets.ModelViewSet):
     
     filter_backends = [DjangoFilterBackend]
     filterset_class = JobCardFilter
+
+    @action(detail=True, methods=['get'])
+    def employees(self, request, pk=None):
+        job_card = self.get_object()
+        
+        # Get all payment balls for this job card
+        payment_balls = job_card.payment_balls.all()
+        
+        # Collect all employee IDs
+        employee_ids = set()
+        for payment_ball in payment_balls:
+            # Get tasks for this payment ball
+            tasks = payment_ball.tasks.all()
+            
+            # Get assignees from tasks
+            for task in tasks:
+                if task.assignee:
+                    employee_ids.add(task.assignee.id)
+                
+                # Also get assignees from subcontracts
+                for subcontract in task.subcontracts.all():
+                    if subcontract.assignee:
+                        employee_ids.add(subcontract.assignee.id)
+        
+        # Get employee objects
+        employees = Employee.objects.filter(id__in=employee_ids)
+        
+        # Serialize and return - pass the request context
+        serializer = EmployeeSerializer(employees, many=True, context={'request': request})
+        return Response(serializer.data)
+    
+
+    @action(detail=True, methods=['get'])
+    def expenses(self, request, pk=None):
+        job_card = self.get_object()
+        expenses = job_card.expenses.all()
+        
+        # Optional: Filter by status
+        status = request.query_params.get('status')
+        if status:
+            expenses = expenses.filter(status=status)
+        
+        # Optional: Filter by date range
+        start_date = request.query_params.get('start_date')
+        end_date = request.query_params.get('end_date')
+        
+        if start_date:
+            expenses = expenses.filter(date__gte=start_date)
+        if end_date:
+            expenses = expenses.filter(date__lte=end_date)
+        
+        # Calculate totals
+        total = expenses.aggregate(total=Sum('amount'))['total'] or 0
+        approved_total = expenses.filter(status='Approved').aggregate(total=Sum('amount'))['total'] or 0
+        
+        # Serialize expenses
+        serializer = ExpenseSerializer(expenses, many=True)
+        
+        return Response({
+            'expenses': serializer.data,
+            'summary': {
+                'total_expenses': total,
+                'approved_expenses': approved_total,
+                'count': expenses.count()
+            }
+        })
     
     
 
@@ -91,27 +185,26 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
     serializer_class = AccountsPaymentBallSerializer
     queryset = PaymentBall.objects.all()
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['verification_status', 'project_status']
-    print(viewsets)
-
- 
+    filterset_fields = ['verification_status', 'project_status', 'project_percentage']
 
     def get_queryset(self):
         return PaymentBall.objects.select_related(
             'job_card', 'verified_by'
         ).order_by('-verification_date')
-    
+
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
-        print(f'urd : {request.data}')
+        
         if not serializer.is_valid():
             print("Validation errors:", serializer.errors)  # Debugging line
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
             
         self.perform_update(serializer)
-        return Response(serializer.data) 
+        return Response(serializer.data)    
+
+
 
     @action(detail=True, methods=['post'])
     def verify(self, request, pk=None):
@@ -190,6 +283,15 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
             }
         }
         return Response(summary)
+    
+
+    @action(detail=False)
+    def completed(self, request):
+        """Get all payment balls that are 100% complete"""
+        queryset = self.get_queryset().filter(project_percentage=100)
+        page = self.paginate_queryset(queryset)
+        serializer = self.get_serializer(page, many=True)
+        return self.get_paginated_response(serializer.data)
 
 
 class TaskViewSet(viewsets.ModelViewSet):
@@ -257,6 +359,51 @@ class GlobalTaskViewSet(viewsets.ModelViewSet):
         payment_balls = self.get_queryset().filter(payment_ball=payment_ball)
         serializer = self.get_serializer(payment_balls, many=True)
         return Response(serializer.data)
+    
+
+    @action(detail=True, methods=['get'])
+    def remarks_history(self, request, pk=None):
+        task = self.get_object()
+        history = task.remarks_history
+        
+        # Add current remarks if they exist
+        if task.remarks:
+            current = {
+                'remarks': task.remarks,
+                'timestamp': task.updated_at.isoformat(),
+                'status': task.status,
+                'completion_percentage': float(task.completion_percentage),
+                'current': True
+            }
+            history = [current] + (history or [])
+            
+        return Response(history)
+    
+    @action(detail=True, methods=['post'])
+    def update_parent(self, request, pk=None):
+        """Manually trigger update of the parent payment ball"""
+        task = self.get_object()
+        task.update_payment_ball_completion()
+        return Response({
+            'status': 'success',
+            'payment_ball_percentage': float(task.payment_ball.project_percentage),
+            'payment_ball_status': task.payment_ball.project_status
+        })
+    
+    @action(detail=True, methods=['post'])
+    def recalculate(self, request, pk=None):
+        """Manually recalculate the completion percentage"""
+        task = self.get_object()  # This is correctly getting a Task object
+        # Update parent payment ball
+        task.update_payment_ball_completion()
+        return Response({
+            'status': 'success',
+            'task_completion': float(task.completion_percentage),
+            'payment_ball_percentage': float(task.payment_ball.project_percentage),
+            'payment_ball_status': task.payment_ball.project_status
+        })
+
+
 
 
 class GlobalSubContractingViewSet(viewsets.ModelViewSet):
@@ -270,16 +417,39 @@ class GlobalSubContractingViewSet(viewsets.ModelViewSet):
         return self.queryset   
 
 class ExpenseViewSet(viewsets.ModelViewSet):
-    queryset = Expense.objects.all()  # Add this line
+    queryset = Expense.objects.all()
     serializer_class = ExpenseSerializer
-    filterset_fields = ['job_card', 'expense_type', 'status']
+    filterset_fields = [
+        'job_card', 'supplier', 'expense_type', 
+        'status', 'payment_mode', 'date'
+    ]
 
     def get_queryset(self):
-        queryset = Expense.objects.select_related('job_card', 'category')
+        queryset = Expense.objects.select_related('job_card', 'category', 'supplier')
+        
+        # Support for additional filters
         job_card_id = self.request.query_params.get('job_card')
+        supplier_id = self.request.query_params.get('supplier')
+        has_balance = self.request.query_params.get('has_balance')
+        payment_mode = self.request.query_params.get('payment_mode')
+        
         if job_card_id:
             queryset = queryset.filter(job_card_id=job_card_id)
+        if supplier_id:
+            queryset = queryset.filter(supplier_id=supplier_id)
+        if has_balance == 'true':
+            queryset = queryset.filter(balance_amount__gt=0)
+        if payment_mode:
+            queryset = queryset.filter(payment_mode=payment_mode)
+            
         return queryset
+        
+    @action(detail=False, methods=['get'])
+    def unpaid(self, request):
+        """Get all expenses with outstanding balance"""
+        queryset = self.get_queryset().filter(balance_amount__gt=0)
+        serializer = self.get_serializer(queryset, many=True)
+        return Response(serializer.data)
 
 class ExpenseCategoryViewSet(viewsets.ModelViewSet):
     queryset = ExpenseCategory.objects.all()  # Add this line
@@ -324,8 +494,63 @@ class ExpenseHistoryViewSet(viewsets.ModelViewSet):
                 'total_pending': total_pending,
                 'total_expenses': total_approved + total_pending
             }
-        })        
+        })      
 
+
+    @action(detail=False, methods=['get'])
+    def job_card_summary(self, request):
+        """Get expense summary for a specific job card"""
+        job_card_id = request.query_params.get('job_card')
+        if not job_card_id:
+            return Response({"error": "job_card parameter is required"}, status=400)
+
+        expenses = self.get_queryset().filter(job_card_id=job_card_id)
+        
+        # Group by supplier
+        supplier_totals = {}
+        for exp in expenses:
+            supplier_id = exp.supplier_id
+            supplier_name = exp.supplier.name
+            
+            if supplier_id not in supplier_totals:
+                supplier_totals[supplier_id] = {
+                    'supplier_id': supplier_id,
+                    'supplier_name': supplier_name,
+                    'net_total': 0,
+                    'vat_total': 0,
+                    'total': 0,
+                    'paid': 0,
+                    'balance': 0,
+                    'count': 0
+                }
+            
+            supplier_totals[supplier_id]['net_total'] += float(exp.net_amount)
+            supplier_totals[supplier_id]['vat_total'] += float(exp.vat_amount)
+            supplier_totals[supplier_id]['total'] += float(exp.amount)
+            supplier_totals[supplier_id]['paid'] += float(exp.paid_amount)
+            supplier_totals[supplier_id]['balance'] += float(exp.balance_amount)
+            supplier_totals[supplier_id]['count'] += 1
+        
+        # Overall totals
+        overall = {
+            'net_total': sum(float(exp.net_amount) for exp in expenses),
+            'vat_total': sum(float(exp.vat_amount) for exp in expenses),
+            'total': sum(float(exp.amount) for exp in expenses),
+            'paid': sum(float(exp.paid_amount) for exp in expenses),
+            'balance': sum(float(exp.balance_amount) for exp in expenses),
+            'count': expenses.count()
+        }
+        
+        return Response({
+            'supplier_breakdown': list(supplier_totals.values()),
+            'overall': overall
+        })  
+
+
+class SupplierViewSet(viewsets.ModelViewSet):
+    queryset = Supplier.objects.all()
+    serializer_class = SupplierSerializer
+    filterset_fields = ['name', 'status']
 
 
 

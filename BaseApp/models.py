@@ -46,6 +46,7 @@ class Company(models.Model):
 
 class Employee(models.Model):
 
+##access level array for user permissions
     CURRENCY_CHOICES = [
         ('AED', 'AED'),
         ('USD', 'USD'),
