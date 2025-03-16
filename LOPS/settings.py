@@ -139,8 +139,8 @@ CORS_ALLOW_METHODS = [
     'OPTIONS',
 ]
 CORS_ALLOWED_ORIGINS = [
-    # "http://localhost:3000",
-    'http://192.168.1.11:3000'
+    "http://localhost:3000",
+    # 'http://192.168.1.11:3000'
 ]
 
 # Default primary key field type

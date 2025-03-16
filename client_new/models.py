@@ -6,6 +6,10 @@ from BaseApp.models import Company, Employee
 from timesheet.models import Timesheet
 from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
+from .utils import generate_sequential_number
+
+#timesheet employee worlking on whihc prokject related to jobcards - payment of employee to be deducted from profit
+#?project_id = 1 - project timesheet, filter timesheet details,  
 
 
 PERCENTAGE_VALIDATOR = [MinValueValidator(0), MaxValueValidator(100)]
@@ -44,7 +48,7 @@ class RFQ(models.Model):
     rfq_date = models.DateTimeField(auto_now_add=True)
     project_type = models.CharField(max_length=255)
     scope_of_work = models.TextField()
-    quotation_number = models.CharField(max_length=20, unique=True)
+    quotation_number = models.CharField(max_length=20, unique=True) #LETS-QN-YYMM1001 
     quotation_amount = models.DecimalField(max_digits=10, decimal_places=2)
     remarks = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=50, default='Pending', choices=STATUS_CHOICES)
@@ -59,6 +63,14 @@ class RFQ(models.Model):
         related_name='approved_rfqs'
     )
     approval_date = models.DateTimeField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        # Generate quotation number for new records
+        if not self.quotation_number and not self.rfq_id:
+            self.quotation_number = generate_sequential_number(
+                RFQ, "QN", "quotation_number"
+            )
+        super().save(*args, **kwargs)
     
     def approve(self, approved_by):
         self.is_approved = True
@@ -88,7 +100,7 @@ class JobCard(models.Model):
 
     job_id = models.AutoField(primary_key=True)
     rfq = models.ForeignKey(RFQ, on_delete=models.CASCADE, related_name="job_cards")
-    job_number = models.CharField(max_length=20, unique=True)
+    job_number = models.CharField(max_length=20, unique=True) # LTS-JN-YYMM1001
     scope_of_work = models.TextField()
     delivery_timelines = models.DateField()
     payment_terms = models.TextField(blank=True, null=True) 
@@ -112,9 +124,28 @@ class JobCard(models.Model):
     total_timesheet_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     gross_profit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     profit_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
+    
 
     ##lpo
     lpo_number = models.CharField(max_length=20, unique=True)
+
+    def save(self, *args, **kwargs):
+        # Generate job number for new records
+        if not self.job_number and not self.job_id:
+            self.job_number = generate_sequential_number(
+                JobCard, "JN", "job_number"
+            )
+            
+        # Auto-fill client name
+        if self.rfq:
+            self.client_name = self.rfq.client.client_name
+
+        # Calculate profit
+        if self.rfq and self.project_expense:
+            self.profit = self.rfq.quotation_amount - self.project_expense
+
+        # Save the instance
+        super().save(*args, **kwargs)
 
     def update_project_financials(self):
         """Update project financial calculations"""
@@ -289,7 +320,8 @@ class PaymentBall(models.Model):
     )
     verification_date = models.DateTimeField(null=True, blank=True)
     payment_received_date = models.DateTimeField(null=True, blank=True)
-    invoice_number = models.CharField(max_length=20, blank=True, null=True) # add a default value
+    invoice_number = models.CharField(max_length=20, blank=True, null=True) # LETS-INV-YYMM1001
+    Client
     
 
     def save(self, *args, **kwargs):
@@ -328,10 +360,15 @@ class PaymentBall(models.Model):
     def mark_as_invoiced(self):
         if self.verification_status == 'verified':
             self.verification_status = 'invoiced'
-            self.color_status = 'pink'
+            
+            # Generate invoice number regardless of color
             if not self.invoice_number:
-                self.invoice_number = f"INV-{uuid.uuid4().hex[:6].upper()}"
-            self.save()
+                from .utils import generate_sequential_number
+                self.invoice_number = generate_sequential_number(
+                    PaymentBall, "INV", "invoice_number"
+                )
+                
+            self.save(update_fields=['verification_status', 'invoice_number'])
             return True
         return False
 
@@ -344,12 +381,14 @@ class PaymentBall(models.Model):
             return True
         return False
     
-
     def generate_invoice(self):
-        if self.color_status == 'purple' and not self.invoice_number:
-            self.invoice_number = f"INV-{uuid.uuid4().hex[:6].upper()}"
-            self.save()
-
+        """Generate a sequential invoice number"""
+        if not self.invoice_number and self.color_status == 'purple':
+            self.invoice_number = generate_sequential_number(
+                PaymentBall, "INV", "invoice_number"
+            )
+            self.save(update_fields=['invoice_number'])
+    
     def __str__(self):
         return f"PaymentBall {self.payment_id} - {self.project_percentage}% for JobCard {self.job_card.job_number}"
 
@@ -652,9 +691,10 @@ class Expense(models.Model):
         self.balance_amount = self.amount - self.paid_amount
         
         super().save(*args, **kwargs)
-        self.job_card.update_project_financials()        
+        self.job_card.update_project_financials()   
 
-    
+### subcontractor model like client #### to be completed
+### percentage - 
 
 
 

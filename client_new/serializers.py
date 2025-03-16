@@ -30,7 +30,7 @@ class RFQSerializer(serializers.ModelSerializer):
             'quotation_amount', 'remarks', 'status',
             'is_approved', 'approved_by', 'approved_by_name', 'approval_date'
         ]
-        read_only_fields = ['approval_date', 'approved_by', 'approved_by_name']
+        read_only_fields = ['quotation_number', 'approval_date', 'approved_by', 'approved_by_name']
 
 
 
@@ -65,16 +65,19 @@ class ExpenseCategorySerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description']
 
 class ExpenseSerializer(serializers.ModelSerializer):
-    category_name = serializers.CharField(source='category.name', read_only=True)
+    category_name = serializers.CharField(write_only=True, required=False)
+    supplier_name = serializers.CharField(write_only=True, required=False)
+    category_display = serializers.CharField(source='category.name', read_only=True)
+    supplier_display = serializers.CharField(source='supplier.name', read_only=True)
     job_number = serializers.CharField(source='job_card.job_number', read_only=True)
-    supplier_name = serializers.CharField(source='supplier.name', read_only=True)
     lpo_number = serializers.CharField(read_only=True)
 
     class Meta:
         model = Expense
         fields = [
             'expense_id', 'job_card', 'job_number', 'lpo_number',
-            'supplier', 'supplier_name', 'category', 'category_name', 
+            'supplier', 'supplier_name', 'supplier_display',
+            'category', 'category_name', 'category_display',
             'expense_type', 'description', 'net_amount', 'vat_percentage',
             'vat_amount', 'amount', 'payment_mode', 'payment_date',
             'paid_amount', 'balance_amount', 'due_date',
@@ -84,6 +87,52 @@ class ExpenseSerializer(serializers.ModelSerializer):
             'created_at', 'updated_at', 'vat_amount', 'amount', 
             'balance_amount', 'lpo_number'
         ]
+        extra_kwargs = {
+            'category': {'required': False},
+            'supplier': {'required': False}
+        }
+
+    def validate(self, data):
+        # Handle category and supplier by name or ID
+        if 'category' not in data and 'category_name' not in data:
+            raise serializers.ValidationError({"category": "Either category ID or category_name is required"})
+        
+        if 'supplier' not in data and 'supplier_name' not in data:
+            raise serializers.ValidationError({"supplier": "Either supplier ID or supplier_name is required"})
+        
+        # Rest of validation
+        if data.get('net_amount', 0) <= 0:
+            raise serializers.ValidationError({"net_amount": "Net amount must be greater than 0"})
+        
+        # ... other validations ...
+        
+        return data
+
+    def create(self, validated_data):
+        # Handle category by name
+        category_name = validated_data.pop('category_name', None)
+        if category_name and 'category' not in validated_data:
+            # Find or create category by name
+            from client_new.models import ExpenseCategory
+            category, created = ExpenseCategory.objects.get_or_create(
+                name=category_name,
+                defaults={'description': f'Auto-created from expense: {category_name}'}
+            )
+            validated_data['category'] = category
+        
+        # Handle supplier by name
+        supplier_name = validated_data.pop('supplier_name', None)
+        if supplier_name and 'supplier' not in validated_data:
+            # Find or create supplier by name
+            from client_new.models import Supplier
+            supplier, created = Supplier.objects.get_or_create(
+                name=supplier_name,
+                defaults={'contact_person': 'Auto-created'}
+            )
+            validated_data['supplier'] = supplier
+        
+        # Create the expense
+        return super().create(validated_data)
 
     def validate(self, data):
         # Validate net_amount is positive
@@ -127,6 +176,7 @@ class ExpenseHistorySerializer(serializers.ModelSerializer):
 
 class JobCardSerializer(serializers.ModelSerializer):
     client_name = serializers.CharField(read_only=True)
+    quotation_amount = serializers.CharField(source='rfq.quotation_amount', read_only=True)
     profit = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
     completion_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, read_only=True)
     payment_terms = serializers.DictField(
@@ -145,15 +195,26 @@ class JobCardSerializer(serializers.ModelSerializer):
     class Meta:
         model = JobCard
         fields = [
-            'job_id', 'rfq', 'job_number', 'client_name', 'lpo_number',
-            'scope_of_work', 'delivery_timelines',
+            'job_id', 'rfq', 'job_number', 'client_name',
+            'scope_of_work', 'delivery_timelines', 'quotation_amount',
             'payment_terms', 'payment_terms_display', 'status',
             'completion_percentage', 'project_expense', 'profit',
-            'created_at', 'color_status',  'total_expenses', 'total_timesheet_cost',
+            'created_at', 'color_status', 'lpo_number',
+            # Add these missing fields
+            'total_expenses', 'total_timesheet_cost',
             'gross_profit', 'profit_percentage',
             'expenses'
         ]
-        read_only_fields = ['job_id', 'created_at', 'client_name', 'profit', 'completion_percentage']
+        read_only_fields = [
+            'job_id', 'created_at', 'client_name', 'profit', 
+            'completion_percentage', 'job_number',
+            'total_expenses', 'total_timesheet_cost',
+            'gross_profit', 'profit_percentage', 'quotation_amount'
+        ]
+
+    def get_expenses(self, obj):
+        # Return a simplified list of expenses or just count
+        return ExpenseSerializer(obj.expenses.all()[:5], many=True).data    
 
     def get_payment_terms_display(self, obj):
         """
@@ -298,7 +359,7 @@ class PaymentBallSerializer(serializers.ModelSerializer):
 class AccountsPaymentBallSerializer(serializers.ModelSerializer):
     verified_by_name = serializers.CharField(source='verified_by.name', read_only=True)
     job_number = serializers.CharField(source='job_card.job_number', read_only=True)
-    client_name = serializers.CharField(source='job_card.client_name', read_only=True)
+    client_name = serializers.CharField(source='client.client_name', read_only=True)
 
     class Meta:
         model = PaymentBall
@@ -313,6 +374,15 @@ class AccountsPaymentBallSerializer(serializers.ModelSerializer):
             'verification_date', 'payment_received_date',
             'verified_by', 'invoice_number'
         ]
+
+    def get_client_name(self, obj):
+        """Get client name following the relationship chain"""
+        try:
+            if obj.job_card and obj.job_card.rfq and obj.job_card.rfq.client:
+                return obj.job_card.rfq.client.client_name
+            return ""
+        except:
+            return ""  
 
 
 class TaskSerializer(serializers.ModelSerializer):

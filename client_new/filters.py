@@ -4,11 +4,13 @@ from .models import RFQ, JobCard
 class RFQFilter(filters.FilterSet):
     # Define a filter for `position`
     status = filters.CharFilter(field_name='status', lookup_expr='iexact')
+    quotation_number = filters.CharFilter(field_name='quotation_number', lookup_expr='iexact')
+    rfq_id = filters.CharFilter(field_name='rfq_id', lookup_expr='iexact')
     # location = filters.CharFilter(field_name='location', lookup_expr='iexact')
 
     class Meta:
         model = RFQ
-        fields = ['status']
+        fields = ['status', 'quotation_number', 'rfq_id']
 
 
 class JobCardFilter(filters.FilterSet):

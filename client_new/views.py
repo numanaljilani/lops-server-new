@@ -189,7 +189,15 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         return PaymentBall.objects.select_related(
-            'job_card', 'verified_by'
+            
+        ).all()
+
+    def get_queryset(self):
+        return PaymentBall.objects.select_related(
+            'job_card', 
+            'job_card__rfq', 
+            'job_card__rfq__client',
+            'verified_by'
         ).order_by('-verification_date')
 
     def update(self, request, *args, **kwargs):
@@ -425,7 +433,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     ]
 
     def get_queryset(self):
-        queryset = Expense.objects.select_related('job_card', 'category', 'supplier')
+        queryset = Expense.objects.select_related('job_card')
         
         # Support for additional filters
         job_card_id = self.request.query_params.get('job_card')
@@ -435,8 +443,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         
         if job_card_id:
             queryset = queryset.filter(job_card_id=job_card_id)
-        if supplier_id:
-            queryset = queryset.filter(supplier_id=supplier_id)
+        # if supplier_id:
+        #     queryset = queryset.filter(supplier_id=supplier_id)
         if has_balance == 'true':
             queryset = queryset.filter(balance_amount__gt=0)
         if payment_mode:
