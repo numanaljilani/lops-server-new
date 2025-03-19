@@ -8,6 +8,8 @@ from django.core.serializers.json import DjangoJSONEncoder
 from django.utils import timezone
 from .utils import generate_sequential_number
 
+
+
 #timesheet employee worlking on whihc prokject related to jobcards - payment of employee to be deducted from profit
 #?project_id = 1 - project timesheet, filter timesheet details,  
 
@@ -164,7 +166,7 @@ class JobCard(models.Model):
         # Calculate total timesheet cost
         timesheets = Timesheet.objects.filter(job_card=self)
         self.total_timesheet_cost = sum(
-            timesheet.hours_logged * timesheet.hourly_rate 
+            timesheet.total_amount 
             for timesheet in timesheets
         )
 
@@ -325,28 +327,32 @@ class PaymentBall(models.Model):
     
 
     def save(self, *args, **kwargs):
-    # For new instances (no primary key yet), always set project_percentage to 0
+        # For new instances (no primary key yet), always set project_percentage to 0
         if not self.pk:
             self.project_percentage = Decimal('0')
             self.project_status = 'Pending'
         
-        # Get the current instance from the database if it exists
+        # Track verification date
         if self.pk:
             old_instance = PaymentBall.objects.get(pk=self.pk)
             # Check if verification_status changed to 'verified'
             if self.verification_status == 'verified' and old_instance.verification_status != 'verified':
                 self.verification_date = timezone.now()
-        else:
-            # For new instances, set date if status is verified
-            if self.verification_status == 'verified':
-                self.verification_date = timezone.now()
+        elif self.verification_status == 'verified':
+            self.verification_date = timezone.now()
         
         super().save(*args, **kwargs)
-        
-        # If this is a status update to 'Completed', generate invoice
-        if self.project_status == 'Completed' and not self.invoice_number:
-            self.generate_invoice()
-
+    
+    def generate_invoice_number(self):
+        """Generate a sequential invoice number"""
+        if not self.invoice_number:
+            self.invoice_number = generate_sequential_number(
+                PaymentBall, "INV", "invoice_number"
+            )
+            self.save(update_fields=['invoice_number'])
+            return self.invoice_number
+        return self.invoice_number
+    
     def verify_completion(self, verified_by):
         if self.project_status == 'Completed' and self.verification_status == 'unverified':
             self.verification_status = 'verified'
@@ -360,15 +366,12 @@ class PaymentBall(models.Model):
     def mark_as_invoiced(self):
         if self.verification_status == 'verified':
             self.verification_status = 'invoiced'
+            self.color_status = 'pink'
             
-            # Generate invoice number regardless of color
-            if not self.invoice_number:
-                from .utils import generate_sequential_number
-                self.invoice_number = generate_sequential_number(
-                    PaymentBall, "INV", "invoice_number"
-                )
-                
-            self.save(update_fields=['verification_status', 'invoice_number'])
+            # Generate invoice number
+            self.generate_invoice_number()
+            
+            self.save(update_fields=['verification_status', 'color_status', 'invoice_number'])
             return True
         return False
 
@@ -380,14 +383,6 @@ class PaymentBall(models.Model):
             self.save()
             return True
         return False
-    
-    def generate_invoice(self):
-        """Generate a sequential invoice number"""
-        if not self.invoice_number and self.color_status == 'purple':
-            self.invoice_number = generate_sequential_number(
-                PaymentBall, "INV", "invoice_number"
-            )
-            self.save(update_fields=['invoice_number'])
     
     def __str__(self):
         return f"PaymentBall {self.payment_id} - {self.project_percentage}% for JobCard {self.job_card.job_number}"
@@ -683,8 +678,12 @@ class Expense(models.Model):
         if self.job_card and not self.lpo_number:
             self.lpo_number = self.job_card.lpo_number
             
+        # Ensure vat_percentage is a Decimal for calculation
+        from decimal import Decimal
+        vat_percentage = Decimal(str(self.vat_percentage))  # Convert to Decimal safely
+        
         # Calculate VAT and total amount
-        self.vat_amount = (self.net_amount * self.vat_percentage / 100).quantize(Decimal('0.01'))
+        self.vat_amount = (self.net_amount * vat_percentage / Decimal('100')).quantize(Decimal('0.01'))
         self.amount = self.net_amount + self.vat_amount
         
         # Calculate balance

@@ -1,4 +1,6 @@
+# client_new/utils.py
 import datetime
+from decimal import Decimal
 
 def generate_sequential_number(model_class, prefix, field_name):
     """

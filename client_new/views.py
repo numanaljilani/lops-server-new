@@ -8,12 +8,14 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend  # Add this import
-from .filters import RFQFilter, JobCardFilter  # Import the filter
+
+from .filters import RFQFilter, JobCardFilter,  ExpenseFilter # Import the filter
 from django.db.models import Sum, Count 
 from django.utils import timezone
 from rest_framework.decorators import action
 from BaseApp.serializers import EmployeeSerializer
 from BaseApp.models import Employee
+
 
 
 
@@ -232,15 +234,29 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'])
     def mark_invoiced(self, request, pk=None):
         payment_ball = self.get_object()
+        
         if payment_ball.mark_as_invoiced():
             return Response({
                 'status': 'success',
-                'message': 'Payment ball marked as invoiced'
+                'message': 'Payment ball marked as invoiced',
+                'invoice_number': payment_ball.invoice_number
             })
         return Response({
             'status': 'error',
-            'message': 'Cannot mark as invoiced'
+            'message': 'Cannot mark as invoiced. Payment ball must be verified first.'
         }, status=400)
+    
+    @action(detail=True, methods=['post'])
+    def generate_invoice(self, request, pk=None):
+        """Generate invoice number without changing status"""
+        payment_ball = self.get_object()
+        invoice_number = payment_ball.generate_invoice_number()
+        
+        return Response({
+            'status': 'success',
+            'message': 'Invoice number generated',
+            'invoice_number': invoice_number
+        })
 
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
@@ -424,33 +440,93 @@ class GlobalSubContractingViewSet(viewsets.ModelViewSet):
             return self.queryset.filter(task_id=task_id)
         return self.queryset   
 
+
+
 class ExpenseViewSet(viewsets.ModelViewSet):
     queryset = Expense.objects.all()
     serializer_class = ExpenseSerializer
-    filterset_fields = [
-        'job_card', 'supplier', 'expense_type', 
-        'status', 'payment_mode', 'date'
-    ]
-
+    filterset_class = ExpenseFilter
+    
     def get_queryset(self):
-        queryset = Expense.objects.select_related('job_card')
-        
-        # Support for additional filters
-        job_card_id = self.request.query_params.get('job_card')
-        supplier_id = self.request.query_params.get('supplier')
-        has_balance = self.request.query_params.get('has_balance')
-        payment_mode = self.request.query_params.get('payment_mode')
-        
-        if job_card_id:
-            queryset = queryset.filter(job_card_id=job_card_id)
-        # if supplier_id:
-        #     queryset = queryset.filter(supplier_id=supplier_id)
-        if has_balance == 'true':
-            queryset = queryset.filter(balance_amount__gt=0)
-        if payment_mode:
-            queryset = queryset.filter(payment_mode=payment_mode)
-            
+        queryset = Expense.objects.select_related(
+            'job_card', 'category', 'supplier'
+        ).order_by('-date')
         return queryset
+    
+    @action(detail=False, methods=['get'])
+    def by_job_card(self, request):
+        """Get expenses for a specific job card with summary"""
+        job_card_id = request.query_params.get('job_card')
+        if not job_card_id:
+            return Response(
+                {"error": "job_card parameter is required"}, 
+                status=status.HTTP_400_BAD_REQUEST
+            )
+            
+        expenses = self.filter_queryset(
+            self.get_queryset().filter(job_card_id=job_card_id)
+        )
+        
+        # Calculate totals
+        total = expenses.aggregate(total=Sum('amount'))['total'] or 0
+        total_net = expenses.aggregate(total=Sum('net_amount'))['total'] or 0
+        total_vat = expenses.aggregate(total=Sum('vat_amount'))['total'] or 0
+        total_paid = expenses.aggregate(total=Sum('paid_amount'))['total'] or 0
+        total_balance = expenses.aggregate(total=Sum('balance_amount'))['total'] or 0
+        
+        # Status breakdown
+        status_breakdown = expenses.values('status').annotate(
+            count=Count('expense_id'),
+            total=Sum('amount')
+        )
+        
+        # Type breakdown
+        type_breakdown = expenses.values('expense_type').annotate(
+            count=Count('expense_id'),
+            total=Sum('amount')
+        )
+        
+        # Supplier breakdown
+        supplier_breakdown = expenses.values(
+            'supplier', 'supplier__name'
+        ).annotate(
+            count=Count('expense_id'),
+            total=Sum('amount')
+        )
+        
+        # Paginate the expenses for the list view
+        page = self.paginate_queryset(expenses)
+        if page is not None:
+            serializer = self.get_serializer(page, many=True)
+            response = self.get_paginated_response(serializer.data)
+            response.data['summary'] = {
+                'total_expenses': float(total),
+                'total_net': float(total_net),
+                'total_vat': float(total_vat),
+                'total_paid': float(total_paid),
+                'total_balance': float(total_balance),
+                'count': expenses.count(),
+                'status_breakdown': status_breakdown,
+                'type_breakdown': type_breakdown,
+                'supplier_breakdown': supplier_breakdown
+            }
+            return response
+            
+        serializer = self.get_serializer(expenses, many=True)
+        return Response({
+            'expenses': serializer.data,
+            'summary': {
+                'total_expenses': float(total),
+                'total_net': float(total_net),
+                'total_vat': float(total_vat),
+                'total_paid': float(total_paid),
+                'total_balance': float(total_balance),
+                'count': expenses.count(),
+                'status_breakdown': status_breakdown,
+                'type_breakdown': type_breakdown,
+                'supplier_breakdown': supplier_breakdown
+            }
+        })
         
     @action(detail=False, methods=['get'])
     def unpaid(self, request):
