@@ -8,6 +8,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework import status
 from django_filters.rest_framework import DjangoFilterBackend  # Add this import
+import json
 
 from .filters import RFQFilter, JobCardFilter,  ExpenseFilter # Import the filter
 from django.db.models import Sum, Count 
@@ -24,7 +25,7 @@ class ClientViewSet(viewsets.ModelViewSet):
     serializer_class = ClientSerializer
 
 class RFQViewSet(viewsets.ModelViewSet):
-    queryset = RFQ.objects.order_by('-rfq_date').all()
+    queryset = RFQ.objects.order_by('rfq_date').all()
     serializer_class = RFQSerializer
 
     filter_backends = [DjangoFilterBackend]
@@ -36,7 +37,7 @@ class RFQViewSet(viewsets.ModelViewSet):
     
     
 class GlobalRFQViewSet(viewsets.ModelViewSet):
-    queryset = RFQ.objects.all()
+    queryset = RFQ.objects.order_by('rfq_date').all() 
     serializer_class = RFQSerializer
 
     filter_backends = [DjangoFilterBackend]
@@ -181,26 +182,33 @@ class PaymentBallViewSet(viewsets.ModelViewSet):
         return Response(serializer.data)
 
 
-# client_new/views.py
-
 class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
     serializer_class = AccountsPaymentBallSerializer
     queryset = PaymentBall.objects.all()
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['verification_status', 'project_status', 'project_percentage']
+    filterset_fields = [
+        'verification_status', 'project_status', 'project_percentage',
+        'job_card', 'color_status', 'invoice_number'
+    ]
 
     def get_queryset(self):
-        return PaymentBall.objects.select_related(
-            
-        ).all()
-
-    def get_queryset(self):
-        return PaymentBall.objects.select_related(
+        queryset = PaymentBall.objects.select_related(
             'job_card', 
             'job_card__rfq', 
             'job_card__rfq__client',
             'verified_by'
         ).order_by('-verification_date')
+    
+    # Debug print to see relationship data
+        for pb in queryset:
+            print(f"PaymentBall ID: {pb.payment_id}")
+            print(f"  JobCard: {pb.job_card.job_id if pb.job_card else 'None'}")
+            print(f"  RFQ: {pb.job_card.rfq.rfq_id if pb.job_card and pb.job_card.rfq else 'None'}")
+            print(f"  Client: {pb.job_card.rfq.client.client_name if pb.job_card and pb.job_card.rfq and pb.job_card.rfq.client else 'None'}")
+            print(f"  JobCard client_name: {pb.job_card.client_name if pb.job_card else 'None'}")
+        
+        return queryset
+    
 
     def update(self, request, *args, **kwargs):
         partial = kwargs.pop('partial', False)
@@ -231,6 +239,7 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
             'message': 'Cannot verify payment ball'
         }, status=400)
 
+
     @action(detail=True, methods=['post'])
     def mark_invoiced(self, request, pk=None):
         payment_ball = self.get_object()
@@ -248,15 +257,22 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
     
     @action(detail=True, methods=['post'])
     def generate_invoice(self, request, pk=None):
-        """Generate invoice number without changing status"""
+        """Generate invoice number manually"""
         payment_ball = self.get_object()
-        invoice_number = payment_ball.generate_invoice_number()
+        
+        # Only allow generation if payment ball is completed or verified
+        if payment_ball.project_status == 'Completed' or payment_ball.project_percentage == 100 or payment_ball.verification_status == 'verified':
+            invoice_number = payment_ball.generate_invoice_number()
+            return Response({
+                'status': 'success',
+                'message': 'Invoice number generated',
+                'invoice_number': invoice_number
+            })
         
         return Response({
-            'status': 'success',
-            'message': 'Invoice number generated',
-            'invoice_number': invoice_number
-        })
+            'status': 'error',
+            'message': 'Cannot generate invoice. Payment ball must be completed or verified.'
+        }, status=400)
 
     @action(detail=True, methods=['post'])
     def mark_paid(self, request, pk=None):
@@ -316,6 +332,51 @@ class AccountsPaymentBallViewSet(viewsets.ModelViewSet):
         page = self.paginate_queryset(queryset)
         serializer = self.get_serializer(page, many=True)
         return self.get_paginated_response(serializer.data)
+    
+
+    # @action(detail=False)
+    # def financial_summary(self, request):
+    #     """Get financial summary of payment balls for accounting"""
+    #     summary = {
+    #         'total_invoiced': {
+    #             'count': self.get_queryset().filter(verification_status='invoiced').count(),
+    #             'amount': self.get_queryset().filter(verification_status='invoiced').aggregate(
+    #                 total=Sum('amount')
+    #             )['total'] or 0,
+    #             'net': self.get_queryset().filter(verification_status='invoiced').aggregate(
+    #                 total=Sum('net_amount')
+    #             )['total'] or 0,
+    #             'vat': self.get_queryset().filter(verification_status='invoiced').aggregate(
+    #                 total=Sum('vat_amount')
+    #             )['total'] or 0,
+    #             'charity': self.get_queryset().filter(verification_status='invoiced').aggregate(
+    #                 total=Sum('charity_amount')
+    #             )['total'] or 0
+    #         },
+    #         'total_paid': {
+    #             'count': self.get_queryset().filter(verification_status='paid').count(),
+    #             'amount': self.get_queryset().filter(verification_status='paid').aggregate(
+    #                 total=Sum('amount')
+    #             )['total'] or 0,
+    #             'net': self.get_queryset().filter(verification_status='paid').aggregate(
+    #                 total=Sum('net_amount')
+    #             )['total'] or 0,
+    #             'vat': self.get_queryset().filter(verification_status='paid').aggregate(
+    #                 total=Sum('vat_amount')
+    #             )['total'] or 0,
+    #             'charity': self.get_queryset().filter(verification_status='paid').aggregate(
+    #                 total=Sum('charity_amount')
+    #             )['total'] or 0
+    #         },
+    #         'by_client': self.get_queryset().values(
+    #             'job_card__client_name'
+    #         ).annotate(
+    #             count=Count('payment_id'),
+    #             total=Sum('amount'),
+    #             paid=Sum('amount', filter=models.Q(verification_status='paid'))
+    #         ).order_by('-total')
+    #     }
+    #     return Response(summary)
 
 
 class TaskViewSet(viewsets.ModelViewSet):

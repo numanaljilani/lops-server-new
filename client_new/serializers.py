@@ -275,11 +275,13 @@ class PaymentBallSerializer(serializers.ModelSerializer):
     class Meta:
         model = PaymentBall
         fields = [
-            'payment_id', 'job_card', 'project_percentage', 
+            'payment_id', 'job_card', 
             'project_status', 'notes', 'color_status', 
             'invoice_number', 'amount', 'payment_terms',
-            'payment_terms_display'
+            'payment_terms_display', 'verification_status',
+            'verified_by', 'verification_date', 'payment_received_date'
         ]
+        read_only_fields = ['payment_id', 'invoice_number', 'verification_date', 'payment_received_date','project_percentage']
         extra_kwargs = {
             'payment_id': {'read_only': True},
             'invoice_number': {'read_only': True}
@@ -325,16 +327,19 @@ class PaymentBallSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-    # Always set project_percentage to 0 when creating a new payment ball
-        validated_data['project_percentage'] = Decimal('0')
-        validated_data['project_status'] = 'Pending'
+        # Remove project_percentage if present - it will be set to 0 in the model
+        if 'project_percentage' in validated_data:
+            validated_data.pop('project_percentage')
         
+        # Handle payment terms
         payment_terms = validated_data.pop('payment_terms', [])
+        
+        # Create instance
         instance = super().create(validated_data)
         
         if payment_terms:
             instance.set_payment_terms(payment_terms)
-            instance.save()
+            instance.save(update_fields=['payment_terms'])
         
         return instance
 
@@ -357,31 +362,60 @@ class PaymentBallSerializer(serializers.ModelSerializer):
 # client_new/serializers.py
 
 class AccountsPaymentBallSerializer(serializers.ModelSerializer):
-    verified_by_name = serializers.CharField(source='verified_by.name', read_only=True)
+    # Basic info fields
     job_number = serializers.CharField(source='job_card.job_number', read_only=True)
-    client_name = serializers.CharField(source='client.client_name', read_only=True)
-
+    client_name = serializers.CharField(source='job_card.client_name', read_only=True)
+    project_name = serializers.CharField(source='job_card.rfq.project_type', read_only=True)
+    brief_scope = serializers.CharField(required=False)
+    lpo_number = serializers.CharField(source='job_card.lpo_number', read_only=True)
+    
+    # Financial fields
+    net_amount = serializers.DecimalField(max_digits=10, decimal_places=2, required=False)
+    vat_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+    vat_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    charity_percentage = serializers.DecimalField(max_digits=5, decimal_places=2, required=False)
+    charity_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
+    
+    # Status tracking
+    verified_by_name = serializers.CharField(source='verified_by.name', read_only=True, allow_null=True)
+    
+    # Payment terms
+    payment_terms_display = serializers.JSONField(source='get_payment_terms', read_only=True)
+    
     class Meta:
         model = PaymentBall
         fields = [
-            'payment_id', 'job_card', 'job_number', 'client_name',
-            'project_percentage', 'project_status', 'verification_status',
-            'verified_by', 'verified_by_name', 'verification_date',
-            'payment_received_date', 'invoice_number', 'amount',
-            'notes', 'color_status'
+            'payment_id', 'job_card', 'job_number', 'lpo_number',
+            'client_name', 'project_name', 'invoice_number',
+            'brief_scope', 'net_amount', 'vat_percentage', 
+            'vat_amount', 'charity_percentage', 'charity_amount',
+            'amount', 'project_percentage', 'project_status',
+            'verification_status', 'verified_by', 'verified_by_name','client_name',
+            'color_status', 'notes', 'payment_terms_display',
+            'verification_date', 'payment_received_date',
         ]
         read_only_fields = [
-            'verification_date', 'payment_received_date',
-            'verified_by', 'invoice_number'
+            'payment_id', 'job_number', 'project_name',
+            'verification_date', 'payment_received_date', 'invoice_number',
+            'vat_amount', 'charity_amount', 'lpo_number', 'project_percentage'
         ]
+        
+    def validate(self, data):
+        # Ensure either amount or net_amount is provided
+        if 'amount' not in data and 'net_amount' not in data:
+            raise serializers.ValidationError(
+                "Either 'amount' or 'net_amount' must be provided"
+            )
+        return data
 
     def get_client_name(self, obj):
-        """Get client name following the relationship chain"""
+        """Get client name directly from the RFQ->Client relationship"""
         try:
             if obj.job_card and obj.job_card.rfq and obj.job_card.rfq.client:
                 return obj.job_card.rfq.client.client_name
             return ""
-        except:
+        except Exception as e:
+            print(f"Error getting client name: {e}")
             return ""  
 
 

@@ -84,7 +84,7 @@ class RFQ(models.Model):
     def __str__(self):
         return f"RFQ for {self.client.client_name} - {self.project_type}"
 
-
+# project name field to be added
 class JobCard(models.Model):
     STATUS_CHOICES = [
         ('Pending', 'Pending'),
@@ -110,7 +110,7 @@ class JobCard(models.Model):
     created_at = models.DateTimeField(auto_now_add=True) # new field
 
     color_status = models.CharField(max_length=6, choices=STATUS_C_CHOICES, default='gray')
-  # New standardized job number
+    # New standardized job number
     client_name = models.CharField(max_length=255, editable=False)  # Will be auto-filled
     
     completion_percentage = models.DecimalField(
@@ -127,6 +127,7 @@ class JobCard(models.Model):
     gross_profit = models.DecimalField(max_digits=10, decimal_places=2, default=0)
     profit_percentage = models.DecimalField(max_digits=5, decimal_places=2, default=0)
     
+    
 
     ##lpo
     lpo_number = models.CharField(max_length=20, unique=True)
@@ -138,8 +139,8 @@ class JobCard(models.Model):
                 JobCard, "JN", "job_number"
             )
             
-        # Auto-fill client name
-        if self.rfq:
+        if self.rfq and self.rfq.client:
+        # Make sure we're getting the client name
             self.client_name = self.rfq.client.client_name
 
         # Calculate profit
@@ -322,35 +323,178 @@ class PaymentBall(models.Model):
     )
     verification_date = models.DateTimeField(null=True, blank=True)
     payment_received_date = models.DateTimeField(null=True, blank=True)
-    invoice_number = models.CharField(max_length=20, blank=True, null=True) # LETS-INV-YYMM1001
-    Client
+    invoice_number = models.CharField(max_length=20, blank=True, null=True) # LETS-INV-1001
+    
+    # Add new financial fields
+    net_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Net amount without VAT"
+    )
+    vat_percentage = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=5.00,
+        validators=[MinValueValidator(0), MaxValueValidator(100)]
+    )
+    vat_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        editable=False
+    )
+    charity_percentage = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=2.50,
+        validators=[MinValueValidator(0), MaxValueValidator(100)]
+    )
+    charity_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        editable=False
+    )
+    brief_scope = models.TextField(blank=True, null=True)
+
+    
+    
+    # Add new financial fields
+    net_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Net amount without VAT"
+    )
+    vat_percentage = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=5.00,
+        validators=[MinValueValidator(0), MaxValueValidator(100)]
+    )
+    vat_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        editable=False
+    )
+    charity_percentage = models.DecimalField(
+        max_digits=5, 
+        decimal_places=2, 
+        default=2.50,
+        validators=[MinValueValidator(0), MaxValueValidator(100)]
+    )
+    charity_amount = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        null=True, 
+        blank=True,
+        editable=False
+    )
+    brief_scope = models.TextField(blank=True, null=True)
+    
+    # Existing fields continue...
+    
     
 
+    
     def save(self, *args, **kwargs):
-        # For new instances (no primary key yet), always set project_percentage to 0
-        if not self.pk:
+        
+        from decimal import Decimal
+    
+        # For new instances (no primary key yet)
+        is_new = not self.pk
+        
+        if is_new:
+            # Set default values for new instances
             self.project_percentage = Decimal('0')
             self.project_status = 'Pending'
         
-        # Track verification date
-        if self.pk:
-            old_instance = PaymentBall.objects.get(pk=self.pk)
-            # Check if verification_status changed to 'verified'
-            if self.verification_status == 'verified' and old_instance.verification_status != 'verified':
-                self.verification_date = timezone.now()
-        elif self.verification_status == 'verified':
-            self.verification_date = timezone.now()
+        # Handle financial calculations with proper type conversion
+        if hasattr(self, 'amount') and self.amount is not None:
+            # Ensure these are Decimal objects before calculations
+            vat_percentage = Decimal(str(self.vat_percentage)) if self.vat_percentage is not None else Decimal('5')
+            charity_percentage = Decimal(str(self.charity_percentage)) if self.charity_percentage is not None else Decimal('2.5')
+            amount = Decimal(str(self.amount))
+            
+            # If net_amount isn't set, calculate it from amount
+            if not self.net_amount:
+                # Calculate divisors
+                vat_factor = Decimal('1') + (vat_percentage / Decimal('100'))
+                charity_factor = Decimal('1') + (charity_percentage / Decimal('100'))
+                
+                # Calculate net amount, VAT and charity
+                net_amount = (amount / (vat_factor * charity_factor)).quantize(Decimal('0.01'))
+                self.net_amount = net_amount
+                self.vat_amount = (net_amount * vat_percentage / Decimal('100')).quantize(Decimal('0.01'))
+                self.charity_amount = (net_amount * charity_percentage / Decimal('100')).quantize(Decimal('0.01'))
+        # ----------------------------------------- #
         
+        
+        
+            # Check for status changes that might trigger invoice generation
+            try:
+                old_instance = PaymentBall.objects.get(pk=self.pk)
+                
+                # Check if verification status changed to 'verified'
+                if self.verification_status == 'verified' and old_instance.verification_status != 'verified':
+                    self.verification_date = timezone.now()
+                
+                # Check if status changed to 'Completed' or percentage reached 100%
+                project_completed = (
+                    (self.project_status == 'Completed' and old_instance.project_status != 'Completed') or
+                    (self.project_percentage == 100 and old_instance.project_percentage < 100)
+                )
+                
+                # Check if status changed to 'invoiced'
+                invoice_status_changed = (
+                    self.verification_status == 'invoiced' and 
+                    old_instance.verification_status != 'invoiced'
+                )
+                
+                # Generate invoice when payment ball is completed or marked as invoiced
+                if (project_completed or invoice_status_changed) and not self.invoice_number:
+                    from .utils import generate_sequential_number
+                    self.invoice_number = generate_sequential_number(
+                        PaymentBall, "INV", "invoice_number"
+                    )
+            except PaymentBall.DoesNotExist:
+                pass
+        
+        # Save the instance with all changes
         super().save(*args, **kwargs)
     
+    def mark_as_invoiced(self):
+        """Mark payment ball as invoiced and generate invoice number"""
+        if self.verification_status == 'verified':
+            self.verification_status = 'invoiced'
+            self.color_status = 'pink'
+            
+            # Generate invoice number if it doesn't exist
+            if not self.invoice_number:
+                from .utils import generate_sequential_number
+                self.invoice_number = generate_sequential_number(
+                    PaymentBall, "INV", "invoice_number"
+                )
+                
+            self.save()
+            return True
+        return False
+    
     def generate_invoice_number(self):
-        """Generate a sequential invoice number"""
+        """Generate an invoice number if one doesn't exist"""
         if not self.invoice_number:
+            from .utils import generate_sequential_number
             self.invoice_number = generate_sequential_number(
                 PaymentBall, "INV", "invoice_number"
             )
             self.save(update_fields=['invoice_number'])
-            return self.invoice_number
         return self.invoice_number
     
     def verify_completion(self, verified_by):
@@ -363,17 +507,7 @@ class PaymentBall(models.Model):
             return True
         return False
 
-    def mark_as_invoiced(self):
-        if self.verification_status == 'verified':
-            self.verification_status = 'invoiced'
-            self.color_status = 'pink'
-            
-            # Generate invoice number
-            self.generate_invoice_number()
-            
-            self.save(update_fields=['verification_status', 'color_status', 'invoice_number'])
-            return True
-        return False
+    
 
     def mark_as_paid(self):
         if self.verification_status == 'invoiced':
@@ -694,6 +828,11 @@ class Expense(models.Model):
 
 ### subcontractor model like client #### to be completed
 ### percentage - 
+## payment ball weightage to be seen in accounts.
+# rfq filter should also have client name
+# accounts - client name, prject name, weightage of that particular ball
+# if the search include even nom it should give result related to all the nom
+##user permission array saved based on group
 
 
 
