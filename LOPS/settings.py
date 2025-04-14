@@ -140,7 +140,8 @@ CORS_ALLOW_METHODS = [
 ]
 CORS_ALLOWED_ORIGINS = [
     "http://localhost:3000",
-    'http://192.168.21.213:3000'
+    'http://192.168.21.213:3000',
+    "http://13.61.184.90:8000"
 ]
 
 # Default primary key field type
